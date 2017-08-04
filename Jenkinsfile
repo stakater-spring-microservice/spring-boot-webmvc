@@ -42,6 +42,10 @@ mavenNode{
       version = canaryVersion
     }
 
+    stage("dependency tree") {
+        sh 'mvn dependency:tree -Dscope=test'
+    }
+
     stage 'Integration Testing'
     mavenIntegrationTest {
       environment = 'Testing'
