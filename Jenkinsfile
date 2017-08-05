@@ -1,11 +1,11 @@
 #!/usr/bin/groovy
-@Library('github.com/fabric8io/fabric8-pipeline-library@v2.2.311')
+@Library('github.com/fabric8io/fabric8-pipeline-library@master')
 
 def localItestPattern = ""
 try {
   localItestPattern = ITEST_PATTERN
 } catch (Throwable e) {
-  localItestPattern = "*KT"
+  localItestPattern = "*IT"
 }
 
 def localFailIfNoTests = ""
@@ -27,45 +27,59 @@ def canaryVersion = "${versionPrefix}.${env.BUILD_NUMBER}"
 def fabric8Console = "${env.FABRIC8_CONSOLE ?: ''}"
 def utils = new io.fabric8.Utils()
 def label = "buildpod.${env.JOB_NAME}.${env.BUILD_NUMBER}".replace('-', '_').replace('/', '_')
+def envStage = utils.environmentNamespace('stage')
+def envProd = utils.environmentNamespace('run')
+def stashName = ""
+def deploy = false
+mavenNode {
+  checkout scm
+  if (utils.isCI()){
 
-mavenNode{
-  def envStage = utils.environmentNamespace('staging')
-  def envProd = utils.environmentNamespace('production')
+    mavenCI{}
 
-  git 'http://gogs.digitaldealer.ddzandbox.com/gogsadmin/spring-boot-webmvc.git'
+  } else if (utils.isCD()){
+    deploy = true
+    echo 'NOTE: running pipelines for the first time will take longer as build and base docker images are pulled onto the node'
+    container(name: 'maven') {
 
-  echo 'NOTE: running pipelines for the first time will take longer as build and base docker images are pulled onto the node'
-  container(name: 'maven') {
+      stage('Build Release'){
+        mavenCanaryRelease {
+          version = canaryVersion
+        }
+      }
 
-    stage 'Build Release'
-    mavenCanaryRelease {
-      version = canaryVersion
+      stage('Integration Testing'){
+        mavenIntegrationTest {
+          environment = 'Test'
+          failIfNoTests = localFailIfNoTests
+          itestPattern = localItestPattern
+        }
+      }
+
+      stage('Rollout to Stage'){
+        kubernetesApply(environment: envStage)
+        //stash deployments
+        stashName = label
+        stash includes: '**/*.yml', name: stashName
+      }
     }
-
-    stage("dependency tree") {
-        sh 'mvn dependency:tree -Dscope=test'
-    }
-
-    stage 'Integration Testing'
-    mavenIntegrationTest {
-      environment = 'Testing'
-      failIfNoTests = localFailIfNoTests
-      itestPattern = localItestPattern
-    }
-
-    stage 'Rollout Staging'
-    kubernetesApply(environment: envStage)
-
-    stage 'Approve'
-    approve {
-      room = null
-      version = canaryVersion
-      console = fabric8Console
-      environment = 'Staging'
-    }
-
-    stage 'Rollout Production'
-    kubernetesApply(environment: envProd)
-
   }
+}
+
+if (deploy){
+    node {
+        stage('Approve'){
+          approve {
+            room = null
+            version = canaryVersion
+            console = fabric8Console
+            environment = 'Stage'
+          }
+        }
+
+        stage('Rollout to Run'){
+          unstash stashName
+          kubernetesApply(environment: envProd)
+        }
+    }
 }
